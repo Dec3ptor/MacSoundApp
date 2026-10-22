@@ -9,6 +9,20 @@ equally, instead of making the loud one even louder.
 
 Runs on macOS 11 Big Sur and later (tested target: MacBook Pro Mid 2014, 11.7.9).
 
+## Run it right now (no install)
+
+Open Terminal and paste this one line:
+
+```
+curl -fsSL https://raw.githubusercontent.com/Dec3ptor/MacSoundApp/claude/amazing-faraday-o2pl3c/speaker_balance.py -o ~/Desktop/speaker_balance.py && python ~/Desktop/speaker_balance.py
+```
+
+It uses the Python that is already part of macOS (2.7 on Big Sur, any
+python3 also works) and opens a small window with the same sliders as the
+native app. Next time, just run `python ~/Desktop/speaker_balance.py` again.
+If the window can't open, run `python ~/Desktop/speaker_balance.py --cli`
+for a text version.
+
 ## How it works
 
 macOS exposes a separate hardware volume control for the left and right
@@ -32,7 +46,7 @@ Features:
 HDMI and optical outputs have no hardware volume at all, so the app can only
 tell you that; use the knob on the amplifier for those.
 
-## Building
+## Building the native app (needs Xcode)
 
 You need the Swift toolchain. On Big Sur that means **Xcode 13.2.1** (the last
 Xcode that runs on 11.x) or the matching Command Line Tools:
