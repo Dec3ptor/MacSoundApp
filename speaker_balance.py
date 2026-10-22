@@ -10,8 +10,8 @@ Runs on the Python that ships with macOS (2.7 on Big Sur, or any python3).
 No Xcode, no extra packages. It drives the same per-channel CoreAudio volume
 controls that the Balance slider in System Preferences uses.
 
-    python speaker_balance.py          # window with sliders
-    python speaker_balance.py --cli    # text mode (if Tk is unavailable)
+    python speaker_balance.py          # opens the controls in your browser
+    python speaker_balance.py --cli    # text mode in the Terminal
 """
 from __future__ import print_function
 
@@ -474,179 +474,242 @@ class TestSound(object):
 
 
 # ---------------------------------------------------------------------------
-# GUI (Tk)
+# GUI: a tiny local web page opened in your browser (no Tk, which crashes on
+# some macOS/Python combinations)
 # ---------------------------------------------------------------------------
 
-def pct(v):
-    return "%d%%" % int(round(v * 100))
+try:
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+except ImportError:  # Python 2
+    from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 
+PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Speaker Balance</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root { --bg:#f5f5f7; --card:#fff; --fg:#1d1d1f; --muted:#6e6e73; --accent:#0a84ff; --line:#e5e5ea; }
+@media (prefers-color-scheme: dark) { :root { --bg:#1c1c1e; --card:#2c2c2e; --fg:#f5f5f7; --muted:#98989d; --line:#3a3a3c; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+main { max-width:560px; margin:24px auto; padding:0 16px; }
+h1 { font-size:22px; margin:0 0 16px; }
+section { background:var(--card); border-radius:12px; padding:16px; margin-bottom:14px; box-shadow:0 1px 2px rgba(0,0,0,.08); }
+h2 { font-size:15px; margin:0 0 10px; }
+.row { display:flex; align-items:center; gap:10px; margin:8px 0; }
+.row label { width:52px; }
+input[type=range] { flex:1; -webkit-appearance:none; height:6px; border-radius:3px; background:var(--line); outline:none; }
+input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:22px; height:22px; border-radius:50%; background:#fff; border:1px solid #c7c7cc; box-shadow:0 1px 3px rgba(0,0,0,.3); cursor:pointer; }
+input[type=range]:disabled { opacity:.4; }
+.val { width:48px; text-align:right; font-variant-numeric:tabular-nums; }
+.hw { width:110px; text-align:right; color:var(--muted); font-size:13px; font-variant-numeric:tabular-nums; }
+.hint { color:var(--muted); font-size:13px; margin:6px 0 0; }
+select, button { font:inherit; padding:6px 12px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--fg); }
+button { cursor:pointer; }
+button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+button.small { padding:4px 10px; font-size:13px; }
+.spread { display:flex; justify-content:space-between; align-items:center; }
+#err { color:#ff453a; font-size:13px; }
+footer { color:var(--muted); font-size:12px; text-align:center; margin-top:10px; }
+</style></head>
+<body><main>
+<h1>Speaker Balance</h1>
 
-def hw_text(hw, db):
-    return "now %.1f dB" % db if db is not None else "now " + pct(hw)
+<section>
+  <div class="row"><h2 style="margin:0;width:120px">Output device</h2>
+    <select id="device" style="flex:1"></select>
+    <button class="small" id="rescan">Rescan</button></div>
+</section>
+
+<section>
+  <h2>Overall volume</h2>
+  <div class="row"><span>🔈</span><input type="range" id="master" min="0" max="100"><span>🔊</span><span class="val" id="master-val"></span></div>
+  <p class="hint">Raises or lowers both speakers together while keeping the balance below.</p>
+</section>
+
+<section>
+  <div class="spread"><h2>Speaker balance</h2><button class="small" id="reset">Reset</button></div>
+  <div class="row"><label>Left</label><input type="range" id="left" min="0" max="100"><span class="val" id="left-val"></span><span class="hw" id="left-hw"></span></div>
+  <div class="row"><label>Right</label><input type="range" id="right" min="0" max="100"><span class="val" id="right-val"></span><span class="hw" id="right-hw"></span></div>
+  <p class="hint" id="hint"></p>
+</section>
+
+<section>
+  <h2>Test sound (pink noise)</h2>
+  <div class="row">
+    <button data-side="left">▶ Left</button><button data-side="right">▶ Right</button><button data-side="both">▶ Both</button><button id="stop">■ Stop</button>
+  </div>
+  <p class="hint">Plays through the system default output. Use one side at a time to match the speakers by ear.</p>
+</section>
+
+<section>
+  <label class="row" style="margin:0"><input type="checkbox" id="keep"> Keep balance when the volume is changed elsewhere (volume keys, menu bar)</label>
+  <p class="hint">Turn this off if you'd rather use the Balance slider in System Preferences.</p>
+</section>
+
+<div class="spread"><span id="err"></span><button class="small" id="quit">Quit</button></div>
+<footer>Balance is saved per device. Keep the Terminal window open while using this page.</footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let pending = null, inflight = false, dragging = {}, lastDevices = "";
+
+function send(payload) {
+  pending = Object.assign(pending || {}, payload);
+  if (!inflight) flush();
+}
+async function flush() {
+  if (!pending) return;
+  inflight = true;
+  const body = JSON.stringify(pending); pending = null;
+  try { await fetch("/api/set", {method: "POST", headers: {"Content-Type": "application/json"}, body}); }
+  catch (e) { $("err").textContent = "Lost connection to the script. Is the Terminal window still open?"; }
+  inflight = false;
+  if (pending) flush();
+}
+function slider(id, key) {
+  const el = $(id);
+  el.addEventListener("input", () => { dragging[id] = true; $(id + "-val").textContent = el.value + "%"; send({[key]: el.value / 100}); });
+  const done = () => { dragging[id] = false; };
+  el.addEventListener("change", done); el.addEventListener("mouseup", done); el.addEventListener("touchend", done);
+}
+slider("master", "master"); slider("left", "left"); slider("right", "right");
+$("reset").onclick = () => send({reset: true});
+$("rescan").onclick = () => send({rescan: true});
+$("stop").onclick = () => send({sound: "stop"});
+document.querySelectorAll("button[data-side]").forEach(b => b.onclick = () => send({sound: b.dataset.side}));
+$("keep").onchange = () => send({keep: $("keep").checked});
+$("device").onchange = () => send({device: Number($("device").value)});
+$("quit").onclick = async () => { await fetch("/api/quit", {method: "POST"}); document.body.innerHTML = "<main><h1>Speaker Balance</h1><p>Stopped. You can close this tab.</p></main>"; };
+
+const pct = v => Math.round(v * 100) + "%";
+const hw = (v, db) => db === null ? "now " + pct(v) : "now " + db.toFixed(1) + " dB";
+function render(s) {
+  const key = JSON.stringify(s.devices) + s.device;
+  if (key !== lastDevices) {
+    lastDevices = key;
+    $("device").innerHTML = s.devices.map(d => `<option value="${d.id}" ${d.id === s.device ? "selected" : ""}>${d.name}</option>`).join("");
+  }
+  for (const id of ["master", "left", "right"]) {
+    if (!dragging[id]) { $(id).value = Math.round(s[id] * 100); $(id + "-val").textContent = pct(s[id]); }
+  }
+  $("left-hw").textContent = hw(s.hwLeft, s.leftDb);
+  $("right-hw").textContent = hw(s.hwRight, s.rightDb);
+  const stereo = s.capability === "stereo";
+  $("left").disabled = $("right").disabled = !stereo;
+  $("master").disabled = s.capability === "none";
+  $("keep").checked = s.keep;
+  $("hint").textContent = stereo
+    ? "Turn the louder speaker down until both sound the same, then use Overall volume. The ratio you set here is kept as the volume goes up and down."
+    : s.capability === "master"
+      ? "This device only has a single volume control, so the speakers can't be balanced separately. Try another output device."
+      : "This device has no adjustable volume (common for HDMI and optical outputs). Use the knob on the sound system, or pick another output.";
+  document.querySelectorAll("button[data-side]").forEach(b => b.classList.toggle("on", b.dataset.side === s.sound));
+}
+async function poll() {
+  try { render(await (await fetch("/api/state")).json()); $("err").textContent = ""; }
+  catch (e) { $("err").textContent = "Lost connection to the script. Is the Terminal window still open?"; }
+}
+poll(); setInterval(poll, 300);
+</script></body></html>
+"""
 
 
 def run_gui():
-    try:
-        import tkinter as tk
-    except ImportError:
-        import Tkinter as tk
-
     ctl = Controller()
     sound = TestSound()
-    root = tk.Tk()
-    root.title("Speaker Balance")
-    root.resizable(False, False)
-    state = {"updating": False}
+    flags = {"quit": False}
 
-    pad = {"padx": 12, "pady": 4}
+    def state():
+        return {
+            "devices": [{"id": d.id, "name": d.name} for d in ctl.devices],
+            "device": ctl.device.id if ctl.device else None,
+            "capability": ctl.capability,
+            "master": ctl.master, "left": ctl.left_trim, "right": ctl.right_trim,
+            "hwLeft": ctl.hw_left, "hwRight": ctl.hw_right,
+            "leftDb": ctl.left_db, "rightDb": ctl.right_db,
+            "keep": ctl.keep_balance, "sound": sound.side,
+        }
 
-    # Device row
-    frm = tk.Frame(root)
-    frm.pack(fill="x", **pad)
-    tk.Label(frm, text="Output device:", font=("", 13, "bold")).pack(side="left")
-    device_var = tk.StringVar()
-    device_menu = tk.OptionMenu(frm, device_var, "")
-    device_menu.pack(side="left", fill="x", expand=True, padx=6)
+    def handle_set(data):
+        if "device" in data:
+            for d in ctl.devices:
+                if d.id == data["device"] and (ctl.device is None or d.id != ctl.device.id):
+                    ctl.select(d)
+        if data.get("rescan"):
+            ctl.refresh_devices()
+        if "master" in data:
+            ctl.set_master(data["master"])
+        if "left" in data:
+            ctl.set_left_trim(data["left"])
+        if "right" in data:
+            ctl.set_right_trim(data["right"])
+        if data.get("reset"):
+            ctl.reset_trims()
+        if "keep" in data:
+            ctl.set_keep_balance(data["keep"])
+        if "sound" in data:
+            if data["sound"] == "stop":
+                sound.stop()
+            else:
+                sound.toggle(data["sound"])
 
-    def rebuild_device_menu():
-        menu = device_menu["menu"]
-        menu.delete(0, "end")
-        for d in ctl.devices:
-            menu.add_command(label=d.name, command=lambda dev=d: choose_device(dev))
-        device_var.set(ctl.device.name if ctl.device else "(no output device)")
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
 
-    def choose_device(dev):
-        if ctl.device is None or dev.id != ctl.device.id:
-            ctl.select(dev)
-        refresh_ui()
+        def _send(self, body, ctype="application/json"):
+            data = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype + "; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
 
-    def refresh_devices():
-        ctl.refresh_devices()
-        rebuild_device_menu()
-        refresh_ui()
+        def do_GET(self):
+            if self.path == "/api/state":
+                self._send(json.dumps(state()))
+            elif self.path == "/" or self.path.startswith("/?"):
+                self._send(PAGE, "text/html")
+            else:
+                self.send_error(404)
 
-    tk.Button(frm, text="Rescan", command=refresh_devices).pack(side="left")
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            if self.path == "/api/set":
+                try:
+                    handle_set(json.loads(body.decode("utf-8")))
+                except Exception as e:
+                    self._send(json.dumps({"error": str(e)}))
+                    return
+                self._send(json.dumps(state()))
+            elif self.path == "/api/quit":
+                flags["quit"] = True
+                self._send("{}")
+            else:
+                self.send_error(404)
 
-    # Overall volume
-    tk.Label(root, text="Overall volume", font=("", 13, "bold"), anchor="w").pack(fill="x", **pad)
-    frm = tk.Frame(root)
-    frm.pack(fill="x", **pad)
-    master_scale = tk.Scale(frm, from_=0, to=100, orient="horizontal", length=360, showvalue=0,
-                            command=lambda v: on_master(v))
-    master_scale.pack(side="left")
-    master_label = tk.Label(frm, width=5, anchor="e")
-    master_label.pack(side="left")
-    tk.Label(root, text="Raises or lowers both speakers together while keeping the balance below.",
-             fg="gray40", anchor="w").pack(fill="x", padx=12)
-
-    # Balance
-    frm = tk.Frame(root)
-    frm.pack(fill="x", **pad)
-    tk.Label(frm, text="Speaker balance", font=("", 13, "bold")).pack(side="left")
-    tk.Button(frm, text="Reset", command=lambda: (ctl.reset_trims(), refresh_ui())).pack(side="right")
-
-    def channel_row(title, cmd):
-        f = tk.Frame(root)
-        f.pack(fill="x", **pad)
-        tk.Label(f, text=title, width=6, anchor="w").pack(side="left")
-        s = tk.Scale(f, from_=0, to=100, orient="horizontal", length=300, showvalue=0, command=cmd)
-        s.pack(side="left")
-        p = tk.Label(f, width=5, anchor="e")
-        p.pack(side="left")
-        h = tk.Label(f, width=14, anchor="e", fg="gray40")
-        h.pack(side="left")
-        return s, p, h
-
-    left_scale, left_label, left_hw = channel_row("Left", lambda v: on_trim("left", v))
-    right_scale, right_label, right_hw = channel_row("Right", lambda v: on_trim("right", v))
-    hint = tk.Label(root, fg="gray40", anchor="w", justify="left", wraplength=470)
-    hint.pack(fill="x", padx=12)
-
-    # Test sound
-    tk.Label(root, text="Test sound (pink noise)", font=("", 13, "bold"), anchor="w").pack(fill="x", **pad)
-    frm = tk.Frame(root)
-    frm.pack(fill="x", **pad)
-    sound_buttons = {}
-    for side, title in (("left", "Left"), ("right", "Right"), ("both", "Both")):
-        b = tk.Button(frm, text=title, width=7, command=lambda s=side: (sound.toggle(s), refresh_ui()))
-        b.pack(side="left")
-        sound_buttons[side] = b
-    tk.Button(frm, text="Stop", width=7, command=lambda: (sound.stop(), refresh_ui())).pack(side="left")
-    tk.Label(root, text="Plays through the system default output. Use it one side at a time to match the speakers by ear.",
-             fg="gray40", anchor="w", justify="left", wraplength=470).pack(fill="x", padx=12)
-
-    # Options
-    keep_var = tk.IntVar(value=1 if ctl.keep_balance else 0)
-    tk.Checkbutton(root, text="Keep balance when the volume is changed elsewhere (volume keys, menu bar)",
-                   variable=keep_var, command=lambda: (ctl.set_keep_balance(keep_var.get()), refresh_ui()),
-                   anchor="w", justify="left", wraplength=470).pack(fill="x", **pad)
-
-    status = tk.Label(root, fg="gray40", anchor="w")
-    status.pack(fill="x", padx=12, pady=(0, 10))
-
-    def on_master(v):
-        if state["updating"]:
-            return
-        ctl.set_master(int(v) / 100.0)
-        refresh_labels()
-
-    def on_trim(side, v):
-        if state["updating"]:
-            return
-        (ctl.set_left_trim if side == "left" else ctl.set_right_trim)(int(v) / 100.0)
-        refresh_labels()
-
-    def refresh_labels():
-        master_label["text"] = pct(ctl.master)
-        left_label["text"] = pct(ctl.left_trim)
-        right_label["text"] = pct(ctl.right_trim)
-        left_hw["text"] = hw_text(ctl.hw_left, ctl.left_db)
-        right_hw["text"] = hw_text(ctl.hw_right, ctl.right_db)
-        for side, b in sound_buttons.items():
-            b["relief"] = "sunken" if sound.side == side else "raised"
-
-    def refresh_ui():
-        state["updating"] = True
-        try:
-            master_scale.set(int(round(ctl.master * 100)))
-            left_scale.set(int(round(ctl.left_trim * 100)))
-            right_scale.set(int(round(ctl.right_trim * 100)))
-        finally:
-            state["updating"] = False
-        stereo = ctl.capability == Controller.STEREO
-        for w in (left_scale, right_scale):
-            w["state"] = "normal" if stereo else "disabled"
-        master_scale["state"] = "disabled" if ctl.capability == Controller.UNSUPPORTED else "normal"
-        if stereo:
-            hint["text"] = ("Turn the louder speaker down until both sound the same, then use Overall volume. "
-                            "The ratio you set here is kept as the volume goes up and down.")
-        elif ctl.capability == Controller.MASTER_ONLY:
-            hint["text"] = "This device only has a single volume control, so the speakers can't be balanced separately."
-        else:
-            hint["text"] = "This device has no adjustable volume (common for HDMI and optical outputs)."
-        status["text"] = "Settings saved per device in ~/Library/Application Support/SpeakerBalance"
-        refresh_labels()
-
-    def poll():
-        sound.tick()
-        if ctl.sync_from_hardware():
-            refresh_ui()
-        else:
-            refresh_labels()
-        root.after(250, poll)
-
-    def on_close():
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server.timeout = 0.25
+    url = "http://127.0.0.1:%d/" % server.server_address[1]
+    print("Speaker Balance is running at %s" % url)
+    print("Your browser should open it now. Keep this window open; press Ctrl-C (or the Quit button) to stop.")
+    try:
+        subprocess.call(["/usr/bin/open", url])
+    except Exception:
+        print("Open that address in your browser.")
+    try:
+        while not flags["quit"]:
+            server.handle_request()
+            ctl.sync_from_hardware()
+            sound.tick()
+    except KeyboardInterrupt:
+        pass
+    finally:
         sound.stop()
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_close)
-    rebuild_device_menu()
-    refresh_ui()
-    root.after(250, poll)
-    root.lift()
-    root.attributes("-topmost", True)
-    root.after(300, lambda: root.attributes("-topmost", False))
-    root.mainloop()
+        server.server_close()
+        print("Stopped.")
 
 
 # ---------------------------------------------------------------------------
@@ -709,8 +772,4 @@ if __name__ == "__main__":
     if "--cli" in sys.argv:
         run_cli()
     else:
-        try:
-            run_gui()
-        except ImportError:
-            print("Tk is not available, falling back to text mode.")
-            run_cli()
+        run_gui()

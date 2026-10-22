@@ -18,10 +18,10 @@ curl -fsSL https://raw.githubusercontent.com/Dec3ptor/MacSoundApp/claude/amazing
 ```
 
 It uses the Python that is already part of macOS (2.7 on Big Sur, any
-python3 also works) and opens a small window with the same sliders as the
-native app. Next time, just run `python ~/Desktop/speaker_balance.py` again.
-If the window can't open, run `python ~/Desktop/speaker_balance.py --cli`
-for a text version.
+python3 also works) and opens the controls as a page in your browser, served
+only to your own Mac. Keep the Terminal window open while you use it. Next
+time, just run `python ~/Desktop/speaker_balance.py` again. For a text-only
+version, run `python ~/Desktop/speaker_balance.py --cli`.
 
 ## How it works
 
